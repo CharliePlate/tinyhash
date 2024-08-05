@@ -1,5 +1,5 @@
 .env
-./tmp
+tmp
 node_modules
 static/wasm
 static/js/index.js

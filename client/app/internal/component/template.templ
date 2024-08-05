@@ -1,0 +1,19 @@
+package component
+
+import "github.com/charlieplate/TinyHash/ui/internal/component/layout"
+
+templ Home(title string) {
+	@layout.Base(title) {
+		@CalculateButton()
+	}
+}
+
+templ CalculateButton() {
+	<input id="threadCount" type="number" placeholder="How many worker threads to spawn"/>
+	<input id="maxHPS" type="number" placeholder="How many hashes to calculate (Million Hashes per Second)"/>
+	<button id="calcHash" class="bg-red-400">Calculate Hash</button>
+	<button id="cancelHash">Cancel Hash</button>
+	<div id="hash">No Current Min</div>
+	<div id="hashInput">No Current Min</div>
+	<div id="threadStats"></div>
+}

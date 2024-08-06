@@ -3,12 +3,13 @@
 package wasm
 
 import (
-	"encoding/base64"
+	"fmt"
 	"math/rand"
 	"runtime"
 	"sync"
 	"syscall/js"
 	"time"
+	"unsafe"
 
 	"github.com/charlieplate/TinyHash/client/wasm/hashlib"
 )
@@ -45,12 +46,9 @@ func (hi *HashInstance) HashLoop(this js.Value, args []js.Value) interface{} {
 	if len(args) < 1 {
 		return "Error: Expected maxHPS argument"
 	}
-	maxMHPS := args[0].Int() * 1_000_000
-	if maxMHPS <= 0 {
-		return "Error: maxHPS must be positive"
-	}
 	hi.cancelChan = make(chan struct{})
-	seed := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	src := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	go func() {
 		stats := Stats{}
@@ -66,9 +64,7 @@ func (hi *HashInstance) HashLoop(this js.Value, args []js.Value) interface{} {
 				stats.Report()
 			default:
 				stats.TotalHashes++
-				rand := make([]byte, 32)
-				seed.Read(rand)
-				h := hashlib.NewSHA256HashFromString(base64.StdEncoding.EncodeToString(rand))
+				h := hashlib.NewSHA256HashFromString(RandStringBytesMaskImprSrcUnsafe(src, 32))
 
 				isNewMin := h.IsLessThan(globalCurrMin)
 
@@ -121,5 +117,32 @@ type Stats struct {
 func (s Stats) Report() {
 	elapsed := time.Since(s.StartTime).Seconds()
 	hr := float64(s.TotalHashes) / elapsed
-	js.Global().Call("updateStats", s.TotalHashes, int(hr))
+	js.Global().Call("updateStats", s.TotalHashes, fmt.Sprintf("%.2f", hr))
+}
+
+// fast way to calcualte random bytes: https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-go/31832326#31832326
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+const (
+	letterIdxBits = 6
+	letterIdxMask = 1<<letterIdxBits - 1
+	letterIdxMax  = 63 / letterIdxBits
+)
+
+func RandStringBytesMaskImprSrcUnsafe(src *rand.Rand, n int) string {
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+
+	return *(*string)(unsafe.Pointer(&b))
 }

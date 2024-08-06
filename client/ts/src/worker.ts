@@ -1,54 +1,75 @@
-importScripts("/static/js/wasm_exec.js");
+let ready = false;
+let wasmReadyPromise = new Promise<void>((resolve) => {
+  (self as any).wasmReady = () => {
+    ready = true;
+    resolve();
+  };
+});
 
-const go = new Go();
 let threadId: number;
 
-self.onmessage = async function (event) {
+self.onmessage = async function (event: MessageEvent<any>) {
   const { wasmPath, action, maxHPS, newHash, id } = event.data;
+
   if (action === "init") {
     try {
-      const response = await fetch(wasmPath);
-      if (!response.ok) {
-        throw new Error("Failed to fetch WASM file: " + response.statusText);
-      }
-      const bytes = await response.arrayBuffer();
-      const { instance } = await WebAssembly.instantiate(
-        bytes,
+      importScripts("/static/js/wasm_exec.js");
+      const go = new (self as any).Go();
+      const result = await WebAssembly.instantiateStreaming(
+        fetch(wasmPath!),
         go.importObject,
       );
-      go.run(instance);
-      threadId = id;
+      go.run(result.instance);
+      threadId = id!;
+      (self as any).wasmReady();
       self.postMessage({ type: "initialized" });
-    } catch (error: any) {
+    } catch (error) {
       console.error("Error initializing WASM:", error);
-      self.postMessage({ type: "error", message: error.toString() });
+      self.postMessage({ type: "error", message: (error as Error).toString() });
     }
-  } else if (action === "startHash") {
-    startHash(maxHPS);
-  } else if (action === "stopHash") {
-    stopHash();
-  } else if (action === "updateHash") {
-    setCurrentMin(newHash);
+  } else {
+    if (!ready) {
+      console.log("Waiting for WASM to be ready");
+      await wasmReadyPromise;
+    }
+
+    switch (action) {
+      case "startHash":
+        startHash(maxHPS!);
+        break;
+      case "stopHash":
+        stopHash();
+        break;
+      case "updateHash":
+        if (typeof (self as any).setCurrentMin === "function") {
+          (self as any).setCurrentMin(newHash);
+        } else {
+          console.error("setCurrentMin is not available");
+        }
+        break;
+      default:
+        console.error("Unknown action:", action);
+    }
   }
 };
 
-function startHash(maxHPS: number) {
-  hashLoop(maxHPS);
+function startHash(maxHPS: number): void {
+  (self as any).hashLoop(maxHPS);
   console.log("Hash calculation started");
   self.postMessage({ type: "startedHash" });
 }
 
-function stopHash() {
-  cancelLoop();
+function stopHash(): void {
+  (self as any).cancelLoop();
   console.log("Hash calculation stopped");
   self.postMessage({ type: "stoppedHash" });
 }
 
-function updateHash(newHash: string, input: string) {
+function updateHash(newHash: string, input: string): void {
   self.postMessage({ type: "updateMin", newHash, input });
 }
 
-function updateStats(totalHashes: number, hps: number) {
+function updateStats(totalHashes: number, hps: number): void {
   self.postMessage({
     type: "updateStats",
     threadId,

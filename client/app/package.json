@@ -4,7 +4,10 @@
   "description": "",
   "author": "",
   "license": "ISC",
-  "devDependencies": {
+  "dependencies": {
     "tailwindcss": "^3.4.7"
+  },
+  "scripts": {
+    "tailwind:generate": "npx tailwindcss -i ../static/css/input.css -o ../static/css/output.css"
   }
 }

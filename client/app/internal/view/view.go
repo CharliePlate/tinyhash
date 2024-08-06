@@ -37,7 +37,5 @@ func Render(ctx echo.Context, statusCode int, t templ.Component) error {
 }
 
 func Home(ctx echo.Context) error {
-	log.Println(":) Someone tried to go home")
-
 	return Render(ctx, http.StatusOK, component.Home("Hello World"))
 }

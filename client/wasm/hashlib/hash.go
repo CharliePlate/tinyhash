@@ -32,7 +32,7 @@ var sha256Pool = sync.Pool{
 }
 
 func NewSHA256HashFromString(input string) SHA256Hash {
-	return NewSHA256HashFromInput(byteslice.String2ByteSlice(input))
+	return NewSHA256HashFromInput(byteslice.String2ByteSlice(input, 64))
 }
 
 func NewSHA256HashFromInput(input []byte) SHA256Hash {
@@ -55,7 +55,7 @@ func NewSHA256Hash(input []byte, hash [32]byte) SHA256Hash {
 }
 
 func (h *SHA256Hash) Input() string {
-	return byteslice.ByteSlice2String(h.InputBytes)
+	return byteslice.ByteSlice2String(h.InputBytes, 64)
 }
 
 func (h *SHA256Hash) Hash() string {

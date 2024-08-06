@@ -3,7 +3,7 @@
 package wasm
 
 import (
-	"encoding/hex"
+	"encoding/base64"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -66,16 +66,23 @@ func (hi *HashInstance) HashLoop(this js.Value, args []js.Value) interface{} {
 				stats.Report()
 			default:
 				stats.TotalHashes++
-				guess := make([]byte, 64)
-				seed.Read(guess)
-				h := hashlib.NewSHA256HashFromString(hex.EncodeToString(guess))
-				globalMutex.Lock()
-				if h.IsLessThan(globalCurrMin) || globalCurrMin.Hash() == "" {
-					globalCurrMin = h
-					js.Global().Call("updateHash", globalCurrMin.Hash(), globalCurrMin.Input())
+				rand := make([]byte, 32)
+				seed.Read(rand)
+				h := hashlib.NewSHA256HashFromString(base64.StdEncoding.EncodeToString(rand))
+
+				isNewMin := h.IsLessThan(globalCurrMin)
+
+				if isNewMin {
+					globalMutex.Lock()
+					if h.IsLessThan(globalCurrMin) {
+						globalCurrMin = h
+						js.Global().Call("updateHash", globalCurrMin.Hash(), globalCurrMin.Input())
+					}
+					globalMutex.Unlock()
 				}
-				globalMutex.Unlock()
-				runtime.Gosched()
+				if (stats.TotalHashes % 10000) == 0 {
+					runtime.Gosched()
+				}
 			}
 		}
 	}()

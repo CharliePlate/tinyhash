@@ -14,6 +14,12 @@ RUN GOOS=js GOARCH=wasm go build -o /dist/static/wasm/main.wasm
 
 RUN mkdir -p /dist/static/js && cp $(go env GOROOT)/misc/wasm/wasm_exec.js /dist/static/js/wasm_exec.js
 
+FROM node:20 AS build-js-stage
+WORKDIR /ts
+COPY /ts /ts
+RUN npm install
+RUN npm run build:docker
+
 FROM gcr.io/distroless/static-debian11 AS release-stage
 WORKDIR /
 

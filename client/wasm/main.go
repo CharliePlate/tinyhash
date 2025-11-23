@@ -2,27 +2,27 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"hash"
 	"math/bits"
-	"math/rand"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 var (
-	globalCurrMin SHA256Hash
-	globalMutex   sync.Mutex
+	globalBestHash  [32]byte
+	globalBestZeros uint32 // Atomic access
+	globalMutex     sync.Mutex
 )
 
 type Stats struct {
 	StartTime   time.Time
-	TotalHashes uint64
+	TotalHashes uint64 // Atomic
 }
 
 func (s *Stats) Report() {
@@ -31,195 +31,136 @@ func (s *Stats) Report() {
 	if elapsed < 0.1 {
 		return
 	}
+
+	globalMutex.Lock()
+	currentHash := globalBestHash
+	globalMutex.Unlock()
+
 	hr := float64(total) / elapsed
 	fmt.Printf(
-		"Hashrate: %.2f MH/s | Total Hashes: %d | Current Min: %s\n",
-		hr/1000000,
+		"\rHashrate: %.2f MH/s | Total: %d | Best: %s",
+		hr/1_000_000,
 		total,
-		globalCurrMin.Hash(),
+		hex.EncodeToString(currentHash[:]),
 	)
 }
 
-type HashInstance struct {
-	cancelChan chan struct{}
-}
-
-func NewHashInstance() *HashInstance {
-	return &HashInstance{
-		cancelChan: make(chan struct{}),
-	}
-}
-
-func (hi *HashInstance) HashLoop(stats *Stats) {
-	hi.cancelChan = make(chan struct{})
-
-	src := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	go func() {
-		for {
-			select {
-			case <-hi.cancelChan:
-				return
-			default:
-				atomic.AddUint64(&stats.TotalHashes, 1)
-
-				h := NewSHA256HashFromString(
-					RandStringBytesMaskImprSrcUnsafe(src, 32),
-				)
-
-				if h.IsLessThan(globalCurrMin) {
-					globalMutex.Lock()
-					if h.IsLessThan(globalCurrMin) {
-						globalCurrMin = h
-					}
-					globalMutex.Unlock()
-				}
-			}
-		}
-	}()
-}
-
-func (hi *HashInstance) CancelLoop() {
-	if hi.cancelChan != nil {
-		close(hi.cancelChan)
-		hi.cancelChan = nil
-	}
-}
-
 func main() {
-	maxHashBytes := bytes.Repeat([]byte{0xFF}, 32)
-	var hashBytes [32]byte
-	copy(hashBytes[:], maxHashBytes)
-	globalCurrMin = NewSHA256Hash(nil, hashBytes)
-
-	stopper := make(chan struct{})
-	hi := NewHashInstance()
-	stats := Stats{StartTime: time.Now()}
+	initBadHash := [32]byte{}
+	for i := range initBadHash {
+		initBadHash[i] = 0xFF
+	}
+	globalBestHash = initBadHash
+	atomic.StoreUint32(&globalBestZeros, 0)
 
 	numWorkers := runtime.NumCPU()
-	fmt.Printf("Starting %d hashing workers...\n", numWorkers)
-	for range numWorkers {
-		hi.HashLoop(&stats)
+	stats := Stats{StartTime: time.Now()}
+
+	stopChan := make(chan struct{})
+
+	fmt.Printf("Starting %d workers optimized for zero-allocation mining...\n", numWorkers)
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		go func(id int) {
+			defer wg.Done()
+			workerLoop(&stats, stopChan)
+		}(i)
 	}
 
 	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-stopper:
+			case <-stopChan:
 				return
-			default:
+			case <-ticker.C:
 				stats.Report()
-				time.Sleep(time.Second)
 			}
 		}
 	}()
 
-	<-stopper
+	select {}
 }
 
-// SHA256Hash struct remains an efficient way to hold hash data.
-type SHA256Hash struct {
-	InputBytes   []byte
-	HashBytes    [32]byte
-	LeadingZeros int
-}
+func workerLoop(stats *Stats, stopChan chan struct{}) {
+	seed := make([]byte, 32)
+	_, _ = rand.Read(seed)
 
-// sync.Pool is an excellent optimization for reducing GC pressure.
-var sha256Pool = sync.Pool{
-	New: func() interface{} {
-		return sha256.New()
-	},
-}
+	var input [40]byte
+	copy(input[:32], seed)
 
-func NewSHA256HashFromString(input string) SHA256Hash {
-	return NewSHA256HashFromInput(unsafeStringToBytes(input))
-}
+	var nonce uint64 = 0
 
-func NewSHA256HashFromInput(input []byte) SHA256Hash {
-	h := sha256Pool.Get().(hash.Hash)
-	h.Reset()
-	h.Write(input)
-	var hash [32]byte
-	h.Sum(hash[:0])
-	sha256Pool.Put(h)
-	return NewSHA256Hash(input, hash)
-}
+	localBestZeros := atomic.LoadUint32(&globalBestZeros)
+	const batchSize = 1000
+	counter := 0
 
-func NewSHA256Hash(input []byte, hash [32]byte) SHA256Hash {
-	l := CountLeadingZeros(hash[:])
-	return SHA256Hash{
-		InputBytes:   input,
-		HashBytes:    hash,
-		LeadingZeros: l,
+	for {
+		binary.LittleEndian.PutUint64(input[32:], nonce)
+		nonce++
+
+		hash := sha256.Sum256(input[:])
+
+		if hash[0] != 0 {
+			counter++
+			if counter >= batchSize {
+				atomic.AddUint64(&stats.TotalHashes, uint64(counter))
+				localBestZeros = atomic.LoadUint32(&globalBestZeros)
+				counter = 0
+
+				select {
+				case <-stopChan:
+					return
+				default:
+				}
+			}
+			continue
+		}
+
+		zeros := countLeadingZeros(hash)
+
+		if uint32(zeros) > localBestZeros || (uint32(zeros) == localBestZeros && compareHash(hash, globalBestHash)) {
+			globalMutex.Lock()
+			currentGlobalZeros := atomic.LoadUint32(&globalBestZeros)
+
+			isBetter := false
+			if uint32(zeros) > currentGlobalZeros {
+				isBetter = true
+			} else if uint32(zeros) == currentGlobalZeros {
+				if bytes.Compare(hash[:], globalBestHash[:]) < 0 {
+					isBetter = true
+				}
+			}
+
+			if isBetter {
+				globalBestHash = hash
+				atomic.StoreUint32(&globalBestZeros, uint32(zeros))
+				localBestZeros = uint32(zeros)
+			}
+			globalMutex.Unlock()
+		}
+
+		counter++
 	}
 }
 
-func (h *SHA256Hash) Hash() string {
-	return hex.EncodeToString(h.HashBytes[:])
-}
-
-func (h *SHA256Hash) IsLessThan(comp SHA256Hash) bool {
-	if h.LeadingZeros > comp.LeadingZeros {
-		return true
-	}
-	if h.LeadingZeros < comp.LeadingZeros {
-		return false
-	}
-	return bytes.Compare(h.HashBytes[:], comp.HashBytes[:]) < 0
-}
-
-// The lookup table is the fastest way to do this. Great implementation.
-var leadingZerosLookup [256]byte
-
-func init() {
-	for i := 0; i < 256; i++ {
-		leadingZerosLookup[i] = byte(bits.LeadingZeros8(uint8(i)))
-	}
-}
-
-func CountLeadingZeros(hash []byte) int {
-	totalZeros := 0
-	for _, b := range hash {
-		zeros := int(leadingZerosLookup[b])
-		totalZeros += zeros
-		if zeros < 8 {
-			break // No need to check further bytes.
+func countLeadingZeros(hash [32]byte) int {
+	zeros := 0
+	for i := 0; i < 32; i++ {
+		if hash[i] == 0 {
+			zeros += 8
+		} else {
+			zeros += bits.LeadingZeros8(hash[i])
+			return zeros
 		}
 	}
-	return totalZeros
+	return zeros
 }
 
-// --- Unsafe String/Byte Generation (Unchanged) ---
-// This is a known fast method for generating random strings.
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-const (
-	letterIdxBits = 6
-	letterIdxMask = 1<<letterIdxBits - 1
-	letterIdxMax  = 63 / letterIdxBits
-)
-
-func RandStringBytesMaskImprSrcUnsafe(src *rand.Rand, n int) string {
-	b := make([]byte, n)
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
-	}
-	return *(*string)(unsafe.Pointer(&b))
-}
-
-func unsafeStringToBytes(s string) []byte {
-	return *(*[]byte)(unsafe.Pointer(
-		&struct {
-			string
-			Cap int
-		}{s, len(s)},
-	))
+func compareHash(h1, h2 [32]byte) bool {
+	return bytes.Compare(h1[:], h2[:]) < 0
 }

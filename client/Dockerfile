@@ -1,4 +1,4 @@
-FROM golang:1.22 AS build-stage
+FROM golang:1.25 AS build-stage
 WORKDIR /app
 COPY app/go.mod app/go.sum ./
 RUN go mod download

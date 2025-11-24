@@ -1,7 +1,0 @@
-.env
-tmp
-node_modules
-static/wasm
-static/js/index.js
-static/js/worker.js
-
